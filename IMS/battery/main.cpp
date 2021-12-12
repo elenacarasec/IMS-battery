@@ -6,7 +6,6 @@
 
 #include <simlib.h>
 #include <getopt.h>
-#include <stdlib.h>     
 #include <iostream>
 
 // time units
