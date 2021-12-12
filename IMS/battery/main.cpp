@@ -6,6 +6,7 @@
 
 #include <simlib.h>
 #include <getopt.h>
+#include <stdlib.h>     
 #include <iostream>
 
 // time units
@@ -16,15 +17,14 @@
 
 // dismantling centre capacity
 #define DISMANTLING_CENTRE 14
-// available trucks
-#define TRUCK 1
-// plant lines
-#define PLANT 2
 
 // truck emission of C02 (kg) per km
 #define EMISSION 0.03122
 // plant emission savings of C02 (kg) per battery kWh
 #define PLANT_EMISSION 736
+
+// Dismantling centre capacity
+int dism_cap = 14;
 
 // For debug
 // Sold cars
@@ -55,26 +55,29 @@ bool is_day = false;
  * @brief Strucure with input arguments.
  */
 struct input_args {
-    unsigned int time; // simulation time
-    unsigned int cars; // sold cars per year
-    unsigned int plant; // number of plant lines
+    int time; // simulation time
+    int cars; // sold cars per year
+    int plant; // number of plant lines
+    int truck; // number of truck drivers
 } input_args;
 
 // Call truck driver when there are 6 batteries to carry
 Facility Notification("Notification");
 
-// Dismantling centre
-Store DismantlingCentre("Centre", DISMANTLING_CENTRE);
+// Dismantling centres
+Facility DismantlingCentre[DISMANTLING_CENTRE];
 // Available trucks
-Store Truck("Truck", TRUCK);
-// Recy Plant
-Store Plant("Plant", PLANT);
+Store Truck("Truck", 1);
+// Recycling Plant
+Store Plant("Plant", 1);
 
 //statistiky
 Histogram car_hist("Car Lifecycle",  7 * YEAR, YEAR, 3 );
 Histogram car_gen("Car output",  0, YEAR, 20);
 
-
+/**
+ * @brief Recycling batteries plant.
+ */
 class PlantProcessing: public Process{
     void Behavior() {
         Enter(Plant, 1);
@@ -86,7 +89,10 @@ class PlantProcessing: public Process{
     }
 };
 
-class Pack : public Process{
+/**
+ * @brief Ride from the plant to dismantling centre and return.
+ */
+class TruckRide : public Process{
     void Behavior() {
         Enter(Truck, 1);
         battery_pack--;
@@ -120,17 +126,23 @@ class Pack : public Process{
     }
 };
 
+/**
+ * @brief Dismantling centre.
+ */
 class DismCentre : public Process {
     void Behavior() {
+    
         if (is_day && batteries_dead > 0) {
             batteries_dead--;
-            Enter(DismantlingCentre, 1);
+            int dism_number = dism_cap - 1;
+            dism_cap--;
+            Seize(DismantlingCentre[dism_number]);
             Wait(2 * HOUR);
-            Leave(DismantlingCentre, 1);
+            Release(DismantlingCentre[dism_number]);
+            dism_cap ++;
 
             number_of_batteries_waiting_for_truck++;
             if (number_of_batteries_waiting_for_truck == 6) {
-                double start_notif = Time;
                 Seize(Notification);
                 number_of_batteries_waiting_for_truck -= 6;
                 battery_pack++;
@@ -138,7 +150,7 @@ class DismCentre : public Process {
                 while (!is_day) {
                     Wait(8 * HOUR);
                 }
-                (new Pack)->Activate();
+                (new TruckRide)->Activate();
 
                 Release(Notification);
             }
@@ -146,8 +158,10 @@ class DismCentre : public Process {
     }
 };
 
-
-class Auto : public Process {
+/**
+ * @brief Battery lifecycle.
+ */
+class Battery : public Process {
     void Behavior() {
         // Battery End-of-life
         car++;
@@ -157,14 +171,19 @@ class Auto : public Process {
         batteries_dead++;
         car_hist(Time - car_life);
 
-        double start_dism = Time;
         while (!is_day)
            Wait(8 * HOUR);
-
+        
+        while (dism_cap == 0) {
+            Wait(MINUTE);
+        }
         (new DismCentre)->Activate();
     }
 };
 
+/**
+ * @brief 8 hours workshift and 16 hours idle.
+ */
 class Workshift : public Event {
 	void Behavior() {
 		if(!is_day) {
@@ -177,9 +196,12 @@ class Workshift : public Event {
 	}
 };
 
+/**
+ * @brief Sold cars generator
+ */
 class Generator : public Event {
     void Behavior() {
-        (new Auto)->Activate();
+        (new Battery)->Activate();
         Activate(Time + Exponential(YEAR / input_args.cars));
         car_gen(Time);
     }
@@ -191,24 +213,27 @@ void print_help()
         << "\t-h or --help : This help message\n"
 		<< "\t-t or --time : Simulation time in years\n"
 		<< "\t-c or --cars : Number of cars sold per year\n"
-		<< "\t-p or --plant : Number of lines in the plant\n";
+		<< "\t-p or --plant : Number of lines in the plant\n"
+        << "\t-d or --driver : Number of truck drivers\n";
 }
 
 int parse_arguments(int argc, char **argv) {
     int opt;
 	char *err;
-	static const char *short_opts = "t:c:p:";
+	static const char *short_opts = "t:c:p:d:";
 	static const struct option long_opts[] = {
         {"help", required_argument, nullptr, 'h'},
 		{"time", required_argument, nullptr, 't'},
 		{"cars", required_argument, nullptr, 'c'},
 		{"plant", required_argument, nullptr, 'p'},
+        {"driver", required_argument, nullptr, 'd'},
 		{nullptr, 0, nullptr, 0},
 	};
 
     input_args.cars = 1;
     input_args.time = 1;
     input_args.plant = 1;
+    input_args.truck = 1;
 
     while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
 		switch (opt) {
@@ -239,6 +264,14 @@ int parse_arguments(int argc, char **argv) {
 				}
 				break;
 
+            case 'd':
+				input_args.truck = strtoul(optarg, &err, 10);
+				if (*err != '\0' || input_args.plant < 0) {
+					std::cerr << "Number of truck drivers must be a positive integer greater than 0.\n";
+					return EXIT_FAILURE;
+				}
+				break;
+
             case 'h':
                 print_help();
                 return EXIT_SUCCESS;
@@ -258,16 +291,8 @@ int main(int argc, char*argv[]) {
         return ret;
     }
 
-    // is_day = false;
-    // car = 0;
-    // batteries_sum = 0;
-    // number_of_batteries_waiting_for_truck = 0;
-    // battery_pack = 0;
-    // co2_truck = 0;
-    // co2_output = 0;
-    // batteries_in_trip = 0;
-    // batteries_on_plant = 0;
-    // batteries_processed = 0;
+    Plant.SetCapacity(input_args.plant);
+    Truck.SetCapacity(input_args.truck);
 
     RandomSeed(time(NULL));
     Init(0, input_args.time * YEAR); // simulation time
@@ -288,7 +313,6 @@ int main(int argc, char*argv[]) {
     Print("CO2 output: %.2ft\n", co2_output / 1000);
 
     car_hist.Output();
-    car_gen.Output();
 
     return EXIT_SUCCESS;
 }
