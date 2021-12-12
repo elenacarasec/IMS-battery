@@ -1,50 +1,79 @@
 /**
- *  IMS - project
+ *  IMS - project "Battery recycling"
+ *  Authors: Elena Carasec (xcaras00),
+ *           Viktoryia Tomason (xtomas34)
  */
+
 #include <simlib.h>
 #include <getopt.h>
 #include <iostream>
 
+// time units
 #define MINUTE 1
 #define HOUR 60 * MINUTE
 #define DAY 24 * HOUR
 #define YEAR 365 * DAY
+
+// dismantling centre capacity
 #define DISMANTLING_CENTRE 14
+// available trucks
 #define TRUCK 1
-#define PLANT 3
+// plant lines
+#define PLANT 2
 
+// truck emission of C02 (kg) per km
 #define EMISSION 0.03122
-
+// plant emission savings of C02 (kg) per battery kWh
 #define PLANT_EMISSION 736
 
-int car;
-int batteries_dead;
-int batteries_sum;
-int number_of_batteries_waiting_for_truck;
-int battery_pack;
-int batteries_in_trip;
-int batteries_on_plant;
-int batteries_processed;
-double co2_truck;
-double co2_output;
-bool is_day;
+// For debug
+// Sold cars
+int car = 0;
+// Batteries in their end-of-life period
+int batteries_dead = 0;
+// Batteries waiting for dismantle
+int batteries_sum = 0;
+// Batteries before truck driver notification
+int number_of_batteries_waiting_for_truck = 0;
+// Batteries after truck driver notification
+int battery_pack = 0;
+// Batteries on their way to plant
+int batteries_in_trip = 0;
+// Batteries before processing
+int batteries_on_plant = 0;
+// Batteries afteer processing
+int batteries_processed = 0;
 
+// Truck CO2 output in kg
+double co2_truck = 0;
+// Plant CO2 output in kg
+double co2_output = 0;
+// Workshift period
+bool is_day = false;
+
+/**
+ * @brief Strucure with input arguments.
+ */
+struct input_args {
+    unsigned int time; // simulation time
+    unsigned int cars; // sold cars per year
+    unsigned int plant; // number of plant lines
+} input_args;
+
+// Call truck driver when there are 6 batteries to carry
 Facility Notification("Notification");
 
+// Dismantling centre
 Store DismantlingCentre("Centre", DISMANTLING_CENTRE);
+// Available trucks
 Store Truck("Truck", TRUCK);
+// Recy Plant
 Store Plant("Plant", PLANT);
 
 //statistiky
-Histogram trip_to_centre("Trip to centre",  30, 10 * MINUTE, 18);
-Histogram notification("Notification",  0, HOUR, 24);
-Histogram dism("Dismantling centre",  0, HOUR, 24);
-Histogram car_hist("Car Lifecycle",  0, YEAR, 20);
-// Histogram co2_hist("CO2 output",  0, YEAR, 20);
+Histogram car_hist("Car Lifecycle",  7 * YEAR, YEAR, 3 );
+Histogram car_gen("Car output",  0, YEAR, 20);
 
-Stat dead_bat;
-Stat bat_on_plant;
-TStat co2_hist;
 
 class PlantProcessing: public Process{
     void Behavior() {
@@ -68,7 +97,6 @@ class Pack : public Process{
         double end_trip = Time;
         co2_output += (end_trip - start_trip) / 60 * EMISSION;
         co2_truck += (end_trip - start_trip) / 60 * EMISSION;
-        trip_to_centre(end_trip - start_trip);
 
         // Batteries loading
         Wait(Exponential(1 * HOUR));  
@@ -80,14 +108,11 @@ class Pack : public Process{
         co2_output += (end_trip - start_trip) / 60 * EMISSION;
         co2_truck += (end_trip - start_trip) / 60 * EMISSION;
 
-        co2_hist(co2_output);
-
         batteries_in_trip-=6;
         // Batteries unloading
         for (int i = 0; i < 6; i++) {
             Wait(Exponential(15 * MINUTE));
             batteries_on_plant ++;
-            bat_on_plant(batteries_on_plant);
             (new PlantProcessing)->Activate();
         }
 
@@ -111,12 +136,11 @@ class DismCentre : public Process {
                 battery_pack++;
                 
                 while (!is_day) {
-                    Wait(8 * HOUR + 1 * MINUTE);
+                    Wait(8 * HOUR);
                 }
                 (new Pack)->Activate();
 
                 Release(Notification);
-                notification(Time - start_notif);
             }
         }
     }
@@ -131,15 +155,13 @@ class Auto : public Process {
         Wait(Uniform(7 * YEAR, 10 * YEAR));
         batteries_sum++;
         batteries_dead++;
-        dead_bat(batteries_dead);
         car_hist(Time - car_life);
 
         double start_dism = Time;
         while (!is_day)
-           Wait(8 * HOUR + 1 * MINUTE);
+           Wait(8 * HOUR);
 
         (new DismCentre)->Activate();
-        dism(Time - start_dism);
     }
 };
 
@@ -158,106 +180,115 @@ class Workshift : public Event {
 class Generator : public Event {
     void Behavior() {
         (new Auto)->Activate();
-        Activate(Time + Exponential(0.25 * DAY));
+        Activate(Time + Exponential(YEAR / input_args.cars));
+        car_gen(Time);
     }
 };
 
-void Help()
+void print_help()
 {
 	std::cerr << "Possible arguments:\n"
-		<< "\t-t or --cars to specify the number of cars\n"
-		<< "\t-f or --food to specify the number of food\n";
+        << "\t-h or --help : This help message\n"
+		<< "\t-t or --time : Simulation time in years\n"
+		<< "\t-c or --cars : Number of cars sold per year\n"
+		<< "\t-p or --plant : Number of lines in the plant\n";
 }
 
-int main(int argc, char*argv[]) {
-
+int parse_arguments(int argc, char **argv) {
     int opt;
 	char *err;
-	static const char *sOpts = "t:c:p:";
-	static const struct option lOpts[] = {
+	static const char *short_opts = "t:c:p:";
+	static const struct option long_opts[] = {
+        {"help", required_argument, nullptr, 'h'},
 		{"time", required_argument, nullptr, 't'},
 		{"cars", required_argument, nullptr, 'c'},
 		{"plant", required_argument, nullptr, 'p'},
 		{nullptr, 0, nullptr, 0},
 	};
 
-    // 	while ((opt = getopt_long(argc, argv, sOpts, lOpts, nullptr)) != -1)
-	// {
-	// 	switch (opt)
-	// 	{
-	// 		case 0:
-	// 			break;
+    input_args.cars = 1;
+    input_args.time = 1;
+    input_args.plant = 1;
 
-	// 		case 'c':
-	// 			cars = strtoul(optarg, &err, 10);
+    while ((opt = getopt_long(argc, argv, short_opts, long_opts, nullptr)) != -1) {
+		switch (opt) {
+			case 0:
+				break;
 
-	// 			if (*err != '\0')
-	// 			{
-	// 				cerr << "Number of cars must be a positive integer.\n";
-	// 				return EXIT_FAILURE;
-	// 			}
+			case 't':
+				input_args.time = strtoul(optarg, &err, 10);
+				if (*err != '\0' || input_args.time <= 0) {
+					std::cerr << "Simulation time must be a positive integer greater than 0.\n";
+					return EXIT_FAILURE;
+				}
+				break;
 
-	// 			break;
+			case 'c':
+				input_args.cars = strtoul(optarg, &err, 10);
+				if (*err != '\0' || input_args.cars <= 0) {
+					std::cerr << "Number of sold cars must be a positive integer greater than 0.\n";
+					return EXIT_FAILURE;
+				}
+				break;
+            
+            case 'p':
+				input_args.plant = strtoul(optarg, &err, 10);
+				if (*err != '\0' || input_args.plant < 0) {
+					std::cerr << "Number of plant lines must be a positive integer greater than 0.\n";
+					return EXIT_FAILURE;
+				}
+				break;
 
-	// 		case 'f':
-	// 			food = strtod(optarg, &err);
+            case 'h':
+                print_help();
+                return EXIT_SUCCESS;
 
-	// 			if (*err != '\0')
-	// 			{
-	// 				cerr << "Number of food must be a positive number.\n";
-	// 				return EXIT_FAILURE;
-	// 			}
+			case '?':
+			default:
+				print_help();
+				return EXIT_FAILURE;
+		}
+	}
+    return EXIT_SUCCESS;
+}
 
-	// 			if (food < 0)
-	// 			{
-	// 				cerr << "Number of food must be a positive number.\n";
-	// 				return EXIT_FAILURE;
-	// 			}
+int main(int argc, char*argv[]) {
+    int ret = parse_arguments(argc, argv);
+    if (ret != 0) {
+        return ret;
+    }
 
-	// 			break;
-
-	// 		case '?':
-	// 		default:
-	// 			PrintHelp();
-	// 			return EXIT_FAILURE;
-	// 	}
-	// }
-
-    is_day = false;
-    car = 0;
-    batteries_sum = 0;
-    number_of_batteries_waiting_for_truck = 0;
-    battery_pack = 0;
-    co2_truck = 0;
-    co2_output = 0;
-    batteries_in_trip = 0;
-    batteries_on_plant = 0;
-    batteries_processed = 0;
+    // is_day = false;
+    // car = 0;
+    // batteries_sum = 0;
+    // number_of_batteries_waiting_for_truck = 0;
+    // battery_pack = 0;
+    // co2_truck = 0;
+    // co2_output = 0;
+    // batteries_in_trip = 0;
+    // batteries_on_plant = 0;
+    // batteries_processed = 0;
 
     RandomSeed(time(NULL));
-    Init(0, 25 * YEAR); // doba simulace
+    Init(0, input_args.time * YEAR); // simulation time
 
     (new Workshift)->Activate();
     (new Generator)->Activate();
-    Run(); // start simulace
+    Run(); // simulation start
+
+    Print("Sold cars: %d\n", car);
+    Print("Bateries end-of-life: %d\n", batteries_sum);
+    Print("Batteries in dismantling centre: %d\n", batteries_dead);
+    Print("Batteries waiting for truck driver notification: %d\n", number_of_batteries_waiting_for_truck);
+    Print("Battery pack: %d\n", battery_pack * 6);
+    Print("Batteries in trip: %d\n", batteries_in_trip);
+    Print("Batteries on plant: %d\n", batteries_on_plant);
+    Print("Batteries processed: %d\n", batteries_processed);
+    Print("CO2 truck: %.2fkg\n", co2_truck);
+    Print("CO2 output: %.2ft\n", co2_output / 1000);
 
     car_hist.Output();
-    // dead_bat.Output();
-    // bat_on_plant.Output();
-    co2_hist.Output();
+    car_gen.Output();
 
-
-    Print("Car: %d\n", car);
-    Print("Dead batteries %d\n", batteries_sum);
-    Print("Batteries dead: %d\n", batteries_dead);
-    Print("number_of_batteries_waiting_for_truck: %d\n", number_of_batteries_waiting_for_truck);
-    Print("battery_pack: %d\n", battery_pack * 6);
-    Print("batteries_in_trip: %d\n", batteries_in_trip);
-    Print("batteries_on_plant: %d\n", batteries_on_plant);
-    Print("Batteries_processed: %d\n", batteries_processed);
-    Print("Total: %d\n", number_of_batteries_waiting_for_truck + battery_pack*6 + batteries_in_trip + batteries_on_plant + batteries_processed);
-    Print("CO2 truck: %.2ft\n", co2_truck / 1000);
-    Print("CO2 output: %.2ft\n", co2_output / 1000);
-    
     return EXIT_SUCCESS;
 }
